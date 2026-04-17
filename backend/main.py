@@ -1530,136 +1530,149 @@ def increment_video_view(video_id: str):
         "message": "View added",
         "views": updated_video.get("views", 0)
     }
-
-# ===============================
-# AI Search Endpoint
-# ===============================
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-SEARCH_SYNONYMS = {
-    "شبكات": ["شبكات", "مهندس شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
-    "network": ["شبكات", "مهندس شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
-    "ai": ["ai", "artificial intelligence", "machine learning", "deep learning", "ذكاء اصطناعي", "neural network"],
-    "ذكاء اصطناعي": ["ai", "artificial intelligence", "machine learning", "deep learning", "ذكاء اصطناعي", "neural network"],
-    "frontend": ["frontend", "front-end", "react", "html", "css", "javascript", "واجهات"],
-    "backend": ["backend", "back-end", "python", "fastapi", "node", "api", "خلفية"],
-    "mobile": ["mobile", "flutter", "react native", "android", "ios", "تطبيقات"],
-    "python": ["python", "fastapi", "django", "flask"],
-    "رياضيات": ["رياضيات", "math", "mathematics", "numerical analysis", "statistics"]
+def is_arabic_text(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text or ""))
+
+def extract_response_text(result: dict) -> str:
+    try:
+        return result["output"][0]["content"][0]["text"]
+    except Exception:
+        return ""
+
+def normalize_text(value: str) -> str:
+    if not value:
+        return ""
+    return str(value).strip().lower()
+
+def fallback_related_terms(prompt: str) -> list[str]:
+    p = normalize_text(prompt)
+
+    mapping = {
+        "شبكات": ["شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
+        "network": ["شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
+        "رياضيات": ["رياضيات", "math", "mathematics", "numerical analysis", "statistics", "algebra"],
+        "math": ["رياضيات", "math", "mathematics", "numerical analysis", "statistics", "algebra"],
+        "ذكاء اصطناعي": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning"],
+        "ai": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning"],
+        "frontend": ["frontend", "react", "html", "css", "javascript", "واجهات"],
+        "backend": ["backend", "python", "fastapi", "node", "api", "خلفية"],
+        "mobile": ["mobile", "flutter", "react native", "android", "ios", "تطبيقات"],
+        "python": ["python", "fastapi", "django", "flask"],
+    }
+
+    for key, values in mapping.items():
+        if key in p:
+            return values
+
+    return [p]
+
+def ask_ai_for_search_plan(user_prompt: str) -> dict:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing")
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    system_prompt = """
+You are helping a developer recommendation system.
+
+Your job:
+1) Detect the user's reply language: "ar" or "en".
+2) Understand the technical field they want.
+3) Return search terms and related suggestions.
+
+Return JSON only in this exact shape:
+{
+  "language": "ar",
+  "main_query": "شبكات",
+  "keywords": ["شبكات", "network", "networking", "cisco"],
+  "suggestions": ["الأمن السيبراني", "Cisco", "Networking", "Mikrotik"]
 }
 
+Rules:
+- If user writes Arabic, set language to "ar".
+- If user writes English, set language to "en".
+- Keep keywords short and useful for DB search.
+- Suggestions must be related to the same field.
+- Return valid JSON only, no markdown.
+"""
+
+    payload = {
+        "model": "gpt-5.4-mini",
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+    }
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"AI request failed: {response.text}")
+
+    result = response.json()
+    raw_text = extract_response_text(result).strip()
+
+    try:
+        parsed = json.loads(raw_text)
+        return {
+            "language": parsed.get("language", "ar" if is_arabic_text(user_prompt) else "en"),
+            "main_query": parsed.get("main_query", user_prompt),
+            "keywords": parsed.get("keywords", fallback_related_terms(user_prompt)),
+            "suggestions": parsed.get("suggestions", fallback_related_terms(user_prompt)[:4]),
+        }
+    except Exception:
+        return {
+            "language": "ar" if is_arabic_text(user_prompt) else "en",
+            "main_query": user_prompt,
+            "keywords": fallback_related_terms(user_prompt),
+            "suggestions": fallback_related_terms(user_prompt)[:4],
+        }
 
 @app.post("/ai-search")
 async def ai_search(prompt: str = Body(...)):
     try:
-        if not prompt or not str(prompt).strip():
+        user_prompt = str(prompt).strip()
+        if not user_prompt:
             raise HTTPException(status_code=400, detail="Prompt is required")
 
-        user_prompt = str(prompt).strip()
-        user_prompt_lower = user_prompt.lower()
+        search_plan = ask_ai_for_search_plan(user_prompt)
+        language = search_plan["language"]
+        main_query = search_plan["main_query"]
+        keywords = [normalize_text(k) for k in search_plan["keywords"] if normalize_text(k)]
+        suggestions = search_plan["suggestions"]
 
-        # 1) AI يفهم المطلوب ويطلع كلمة أساسية
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        if not keywords:
+            keywords = [normalize_text(user_prompt)]
 
-        ai_data = {
-            "model": "gpt-5-mini",
-            "input": f"""
-You are helping a developer search system.
-
-User request:
-{user_prompt}
-
-Return only ONE short search keyword for programmer skill.
-
-Examples:
-frontend
-backend
-ai
-machine learning
-networks
-cybersecurity
-mobile
-react native
-flutter
-python
-data science
-math
-
-Return ONLY the keyword.
-"""
-        }
-
-        ai_response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=ai_data,
-            timeout=60
-        )
-
-        if ai_response.status_code != 200:
-            raise HTTPException(status_code=500, detail="AI request failed")
-
-        ai_result = ai_response.json()
-
-        ai_keyword = (
-            ai_result.get("output", [{}])[0]
-            .get("content", [{}])[0]
-            .get("text", "")
-            .strip()
-            .lower()
-        )
-
-        if not ai_keyword:
-            ai_keyword = user_prompt_lower
-
-        # 2) نبني كلمات البحث الموسعة
-        expanded_keywords = set()
-        expanded_keywords.add(ai_keyword)
-        expanded_keywords.add(user_prompt_lower)
-
-        for key, values in SEARCH_SYNONYMS.items():
-            if key in user_prompt_lower or key in ai_keyword:
-                for v in values:
-                    expanded_keywords.add(v.lower())
-
-        # إذا المستخدم كتب شيء مباشر مثل React أو Python
-        words = re.findall(r"[\w\u0600-\u06FF\-\+]+", user_prompt_lower)
-        for w in words:
-            expanded_keywords.add(w)
-
-        # 3) نجهز regex query على أكثر من حقل
         regex_conditions = []
-        for kw in expanded_keywords:
+        for kw in keywords:
             regex_conditions.extend([
+                {"job": {"$regex": kw, "$options": "i"}},
                 {"skill": {"$regex": kw, "$options": "i"}},
                 {"technologies": {"$regex": kw, "$options": "i"}},
                 {"bio": {"$regex": kw, "$options": "i"}},
                 {"name": {"$regex": kw, "$options": "i"}},
-                {"job": {"$regex": kw, "$options": "i"}}
             ])
 
-        regex_query = {"$or": regex_conditions}
-
-        developers = list(developers_collection.find(regex_query))
-
-        if not developers:
-            return {
-                "reply": f"No developers found for: {user_prompt}",
-                "keyword": ai_keyword,
-                "developers": []
-            }
+        developers = list(developers_collection.find({"$or": regex_conditions}))
 
         ranked_developers = []
-
         for dev in developers:
             dev_id = str(dev["_id"])
 
             dev_videos = list(videos_collection.find({"developer_id": dev_id}))
             video_ids = [str(v["_id"]) for v in dev_videos]
+
             total_views = sum(v.get("views", 0) for v in dev_videos)
 
             total_likes = 0
@@ -1674,12 +1687,11 @@ Return ONLY the keyword.
                 "id": dev_id,
                 "account_id": dev.get("account_id", ""),
                 "name": dev.get("name", ""),
-                "skill": dev.get("skill", ""),
                 "job": dev.get("job", ""),
+                "skill": dev.get("skill", ""),
+                "technologies": dev.get("technologies", ""),
                 "bio": dev.get("bio", ""),
                 "avatar": dev.get("avatar", ""),
-                "technologies": dev.get("technologies", ""),
-                "portfolio": dev.get("portfolio", ""),
                 "location": dev.get("location", ""),
                 "experience": dev.get("experience", ""),
                 "views": total_views,
@@ -1688,21 +1700,53 @@ Return ONLY the keyword.
             })
 
         ranked_developers.sort(key=lambda x: x["score"], reverse=True)
-
         top_developers = ranked_developers[:5]
 
-        lines = [f"Best developers for '{user_prompt}':"]
-        for i, dev in enumerate(top_developers, start=1):
-            lines.append(
-                f"{i}. {dev['name']} - {dev.get('job', '') or dev.get('skill', '')} "
-                f"- {dev.get('technologies', '')} "
-                f"(Views: {dev['views']}, Likes: {dev['likes']})"
-            )
+        if not top_developers:
+            if language == "ar":
+                reply = (
+                    f"لا يوجد حالياً مبرمجون مطابقون لبحث: {main_query}\n"
+                    f"جربي البحث عن: {', '.join(suggestions)}"
+                )
+            else:
+                reply = (
+                    f"No developers found for: {main_query}\n"
+                    f"Try searching for: {', '.join(suggestions)}"
+                )
+
+            return {
+                "reply": reply,
+                "language": language,
+                "keyword": main_query,
+                "developers": [],
+                "suggestions": suggestions
+            }
+
+        if language == "ar":
+            lines = [f"أفضل المبرمجين في مجال: {main_query}"]
+            for i, dev in enumerate(top_developers, start=1):
+                title = dev.get("job") or dev.get("skill") or "مبرمج"
+                tech = dev.get("technologies", "")
+                lines.append(
+                    f"{i}. {dev['name']} — {title} — {tech} "
+                    f"(المشاهدات: {dev['views']}, الإعجابات: {dev['likes']})"
+                )
+        else:
+            lines = [f"Best developers for: {main_query}"]
+            for i, dev in enumerate(top_developers, start=1):
+                title = dev.get("job") or dev.get("skill") or "Developer"
+                tech = dev.get("technologies", "")
+                lines.append(
+                    f"{i}. {dev['name']} — {title} — {tech} "
+                    f"(Views: {dev['views']}, Likes: {dev['likes']})"
+                )
 
         return {
             "reply": "\n".join(lines),
-            "keyword": ai_keyword,
-            "developers": top_developers
+            "language": language,
+            "keyword": main_query,
+            "developers": top_developers,
+            "suggestions": suggestions
         }
 
     except Exception as e:
