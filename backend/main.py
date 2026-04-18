@@ -25,10 +25,6 @@ cloudinary.config(
     api_key="318563638924659",
     api_secret="tycwgqDQV70EqM-xuHw_DfA7OrE"
 )
-
-
-
-
 @app.post("/upload-image")
 async def upload_image(file: UploadFile = File(...)):
     try:
@@ -250,7 +246,7 @@ class ResetPasswordRequest(BaseModel):
     email_or_phone: str
     code: str
     new_password: str
-  # ===============================
+# ===============================
 # Chat Models
 # ===============================
 class ConversationCreate(BaseModel):
@@ -262,9 +258,11 @@ class MessageCreate(BaseModel):
     conversation_id: str
     sender_id: str
     receiver_id: str
-    text: str = ""
+
+    text: str | None = None
     message_type: str = "text"   # text | image | video
-    media_url: str = ""
+    media_url: str | None = None
+
 
 # ===============================
 # Group Models
@@ -278,9 +276,10 @@ class GroupCreate(BaseModel):
 class GroupMessageCreate(BaseModel):
     group_id: str
     sender_id: str
-    text: str = ""
+
+    text: str | None = None
     message_type: str = "text"   # text | image | video
-    media_url: str = ""
+    media_url: str | None = None
 # ===============================
 # Video Interactions Models
 # ===============================
@@ -1271,8 +1270,7 @@ def ffmpeg_check():
             "output": result.stdout[:200]
         }
     except Exception as e:
-        return {"error": str(e)}
-# ===============================
+        return {"error": str(e)}# ===============================
 # Chat
 # ===============================
 
@@ -1354,8 +1352,10 @@ def get_user_conversations(user_id: str):
             "name": other_user.get("name", "") if other_user else "",
             "username": other_user.get("username", "") if other_user else "",
             "profile_image": other_user.get("profile_image", "") if other_user else "",
+            "account_type": other_user.get("account_type", "") if other_user else "",
             "last_message": conv.get("last_message", ""),
-            "last_message_time": conv.get("last_message_time").isoformat() + "Z" if conv.get("last_message_time") else "",
+            "last_message_time": conv.get("last_message_time").isoformat() + "Z"
+            if conv.get("last_message_time") else "",
             "unread_count": unread_count
         })
 
@@ -1398,8 +1398,10 @@ def get_conversation_messages(conversation_id: str, viewer_id: str = ""):
             "receiver_id": msg.get("receiver_id", ""),
             "text": msg.get("text", ""),
             "message_type": msg.get("message_type", "text"),
+            "media_url": msg.get("media_url", ""),
             "is_read": msg.get("is_read", False),
-            "created_at": msg.get("created_at").isoformat() + "Z" if msg.get("created_at") else ""
+            "created_at": msg.get("created_at").isoformat() + "Z"
+            if msg.get("created_at") else ""
         })
 
     return result
@@ -1420,17 +1422,41 @@ def send_message(data: MessageCreate):
     if not sender or not receiver:
         raise HTTPException(status_code=404, detail="Sender or receiver not found")
 
-    if not data.text.strip():
+    message_type = (data.message_type or "text").strip().lower()
+    text_value = (data.text or "").strip() if data.text else ""
+    media_url = (data.media_url or "").strip() if data.media_url else ""
+
+    if message_type not in ["text", "image", "video"]:
+        raise HTTPException(status_code=400, detail="Invalid message type")
+
+    if message_type == "text" and not text_value:
         raise HTTPException(status_code=400, detail="Message text cannot be empty")
 
+    if message_type in ["image", "video"] and not media_url:
+        media_url = text_value
+
+    if message_type in ["image", "video"] and not media_url:
+        raise HTTPException(status_code=400, detail="Media URL is required")
+
     now = datetime.utcnow()
+
+    if message_type == "text":
+        saved_text = text_value
+        last_message_preview = text_value
+    elif message_type == "image":
+        saved_text = ""
+        last_message_preview = "📷 Image"
+    else:
+        saved_text = ""
+        last_message_preview = "🎥 Video"
 
     message_data = {
         "conversation_id": data.conversation_id,
         "sender_id": data.sender_id,
         "receiver_id": data.receiver_id,
-        "text": data.text.strip(),
-        "message_type": data.message_type,
+        "text": saved_text,
+        "message_type": message_type,
+        "media_url": media_url,
         "is_read": False,
         "created_at": now
     }
@@ -1441,7 +1467,7 @@ def send_message(data: MessageCreate):
         {"_id": safe_object_id(data.conversation_id)},
         {
             "$set": {
-                "last_message": data.text.strip(),
+                "last_message": last_message_preview,
                 "last_message_time": now,
                 "updated_at": now
             }
@@ -1451,8 +1477,34 @@ def send_message(data: MessageCreate):
     return {
         "message": "Message sent successfully",
         "message_id": str(result.inserted_id),
+        "message_type": message_type,
+        "media_url": media_url,
         "created_at": now.isoformat() + "Z"
     }
+@app.post("/chat/upload-image")
+async def chat_upload_image(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="image",
+            folder="stackmate/chat_images"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/upload-video")
+async def chat_upload_video(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="video",
+            folder="stackmate/chat_videos"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # ===============================
 # Video Player Interactions
 # ===============================
