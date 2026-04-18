@@ -222,13 +222,19 @@ class UpdateUserProfile(BaseModel):
     email: str = ""
     description: str = ""
     profile_image: str = ""
-    phone: str = ""
+
     job: str = ""
     location: str = ""
     experience: str = ""
     skills: str = ""
     technologies: str = ""
     portfolio: str = ""
+
+    # ✅ Student Fields (مهم)
+    student_id: str = ""
+    university_name: str = ""
+    college_name: str = ""
+    department_name: str = ""
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -444,7 +450,6 @@ def login(data: LoginData):
         "name": account.get("name", ""),
         "description": account.get("description", ""),
         "profile_image": account.get("profile_image", ""),
-        "phone": account.get("phone", ""),
         "job": account.get("job", ""),
         "location": account.get("location", ""),
         "experience": account.get("experience", ""),
@@ -474,7 +479,6 @@ def get_account(account_id: str):
         "name": account.get("name", ""),
         "description": account.get("description", ""),
         "profile_image": account.get("profile_image", ""),
-        "phone": account.get("phone", ""),
         "job": account.get("job", ""),
         "location": account.get("location", ""),
         "experience": account.get("experience", ""),
@@ -489,7 +493,6 @@ def get_account(account_id: str):
         "department_name": account.get("department_name", "")
     }
 
-
 @app.put("/accounts/{account_id}/profile")
 def update_user_profile(account_id: str, profile: UpdateUserProfile):
     existing = accounts_collection.find_one({"_id": safe_object_id(account_id)})
@@ -503,13 +506,19 @@ def update_user_profile(account_id: str, profile: UpdateUserProfile):
         "email": profile.email,
         "description": profile.description,
         "profile_image": profile.profile_image,
-        "phone": profile.phone,
+
         "job": profile.job,
         "location": profile.location,
         "experience": profile.experience,
         "skills": profile.skills,
         "technologies": profile.technologies,
         "portfolio": profile.portfolio,
+
+        # Student Fields
+        "student_id": profile.student_id,
+        "university_name": profile.university_name,
+        "college_name": profile.college_name,
+        "department_name": profile.department_name,
     }
 
     accounts_collection.update_one(
@@ -538,7 +547,6 @@ def update_user_profile(account_id: str, profile: UpdateUserProfile):
         )
 
     return {"message": "Profile updated successfully"}
-
 
 
 # ===============================
@@ -2161,4 +2169,4 @@ async def group_upload_video(file: UploadFile = File(...)):
         return {"url": result["secure_url"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+        
