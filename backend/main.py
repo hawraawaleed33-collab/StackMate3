@@ -1952,22 +1952,74 @@ def get_user_groups(user_id: str):
             "members_count": len(group.get("members", []))
         })
 
-    return result
-    # ===============================
+    return result# ===============================
 # Group Chat
 # ===============================
 
-@app.get("/group/messages/{group_id}")
-def get_group_messages(group_id: str):
+@app.get("/group/{group_id}")
+def get_group_details(group_id: str):
     group = groups_collection.find_one({"_id": safe_object_id(group_id)})
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
+
+    members_data = []
+
+    for member_id in group.get("members", []):
+        acc = None
+        try:
+            acc = accounts_collection.find_one({"_id": safe_object_id(member_id)})
+        except Exception:
+            acc = None
+
+        if acc:
+            members_data.append({
+                "id": str(acc["_id"]),
+                "name": acc.get("name", "") or acc.get("username", ""),
+                "username": acc.get("username", ""),
+                "profile_image": acc.get("profile_image", ""),
+                "account_type": acc.get("account_type", ""),
+                "university_name": acc.get("university_name", ""),
+                "college_name": acc.get("college_name", ""),
+                "department_name": acc.get("department_name", "")
+            })
+
+    return {
+        "group_id": str(group["_id"]),
+        "name": group.get("name", "Group"),
+        "image": group.get("image", ""),
+        "creator_id": group.get("creator_id", ""),
+        "members_count": len(group.get("members", [])),
+        "members": members_data,
+        "created_at": group.get("created_at").isoformat() + "Z"
+        if group.get("created_at") else ""
+    }
+
+
+@app.get("/group/messages/{group_id}")
+def get_group_messages(group_id: str, viewer_id: str = ""):
+    group = groups_collection.find_one({"_id": safe_object_id(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if viewer_id:
+        group_messages_collection.update_many(
+            {
+                "group_id": group_id,
+                "sender_id": {"$ne": viewer_id},
+                "read_by": {"$ne": viewer_id}
+            },
+            {
+                "$addToSet": {"read_by": viewer_id}
+            }
+        )
 
     messages = group_messages_collection.find({
         "group_id": group_id
     }).sort("created_at", 1)
 
     result = []
+
+    members_count = len(group.get("members", []))
 
     for msg in messages:
         sender = None
@@ -1981,17 +2033,26 @@ def get_group_messages(group_id: str):
             except Exception:
                 sender = None
 
+        read_by = msg.get("read_by", [])
+        delivered_to = msg.get("delivered_to", [])
+
         result.append({
             "id": str(msg["_id"]),
             "group_id": msg.get("group_id", ""),
             "sender_id": sender_id,
-            "sender_name": sender.get("name", "") or sender.get("username", "") if sender else "",
+            "sender_name": (sender.get("name", "") or sender.get("username", "")) if sender else "",
             "sender_image": sender.get("profile_image", "") if sender else "",
+            "sender_account_type": sender.get("account_type", "") if sender else "",
             "text": msg.get("text", ""),
             "message_type": msg.get("message_type", "text"),
             "media_url": msg.get("media_url", ""),
             "created_at": msg.get("created_at").isoformat() + "Z"
-            if msg.get("created_at") else ""
+            if msg.get("created_at") else "",
+            "read_by": read_by,
+            "delivered_to": delivered_to,
+            "read_count": len(read_by),
+            "delivered_count": len(delivered_to),
+            "members_count": members_count
         })
 
     return result
@@ -2006,7 +2067,6 @@ def send_group_message(data: GroupMessageCreate):
     sender = accounts_collection.find_one({"_id": safe_object_id(data.sender_id)})
     if not sender:
         raise HTTPException(status_code=404, detail="Sender not found")
-
     if data.sender_id not in group.get("members", []):
         raise HTTPException(status_code=403, detail="You are not a member of this group")
 
@@ -2028,6 +2088,10 @@ def send_group_message(data: GroupMessageCreate):
 
     now = datetime.utcnow()
 
+    members = group.get("members", [])
+    delivered_to = [member_id for member_id in members if member_id != data.sender_id]
+    read_by = [data.sender_id]
+
     if message_type == "text":
         saved_text = text_value
         last_message_preview = text_value
@@ -2044,6 +2108,8 @@ def send_group_message(data: GroupMessageCreate):
         "text": saved_text,
         "message_type": message_type,
         "media_url": media_url,
+        "delivered_to": delivered_to,
+        "read_by": read_by,
         "created_at": now
     }
 
@@ -2066,6 +2132,8 @@ def send_group_message(data: GroupMessageCreate):
         "media_url": media_url,
         "created_at": now.isoformat() + "Z"
     }
+
+
 # ===============================
 # Group Upload Media
 # ===============================
