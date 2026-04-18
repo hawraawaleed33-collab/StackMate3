@@ -1953,4 +1953,144 @@ def get_user_groups(user_id: str):
         })
 
     return result
+    # ===============================
+# Group Chat
+# ===============================
+
+@app.get("/group/messages/{group_id}")
+def get_group_messages(group_id: str):
+    group = groups_collection.find_one({"_id": safe_object_id(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    messages = group_messages_collection.find({
+        "group_id": group_id
+    }).sort("created_at", 1)
+
+    result = []
+
+    for msg in messages:
+        sender = None
+        sender_id = msg.get("sender_id", "")
+
+        if sender_id:
+            try:
+                sender = accounts_collection.find_one({
+                    "_id": safe_object_id(sender_id)
+                })
+            except Exception:
+                sender = None
+
+        result.append({
+            "id": str(msg["_id"]),
+            "group_id": msg.get("group_id", ""),
+            "sender_id": sender_id,
+            "sender_name": sender.get("name", "") or sender.get("username", "") if sender else "",
+            "sender_image": sender.get("profile_image", "") if sender else "",
+            "text": msg.get("text", ""),
+            "message_type": msg.get("message_type", "text"),
+            "media_url": msg.get("media_url", ""),
+            "created_at": msg.get("created_at").isoformat() + "Z"
+            if msg.get("created_at") else ""
+        })
+
+    return result
+
+
+@app.post("/group/message")
+def send_group_message(data: GroupMessageCreate):
+    group = groups_collection.find_one({"_id": safe_object_id(data.group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    sender = accounts_collection.find_one({"_id": safe_object_id(data.sender_id)})
+    if not sender:
+        raise HTTPException(status_code=404, detail="Sender not found")
+
+    if data.sender_id not in group.get("members", []):
+        raise HTTPException(status_code=403, detail="You are not a member of this group")
+
+    message_type = (data.message_type or "text").strip().lower()
+    text_value = (data.text or "").strip()
+    media_url = (data.media_url or "").strip()
+
+    if message_type not in ["text", "image", "video"]:
+        raise HTTPException(status_code=400, detail="Invalid message type")
+
+    if message_type == "text" and not text_value:
+        raise HTTPException(status_code=400, detail="Message text cannot be empty")
+
+    if message_type in ["image", "video"] and not media_url:
+        media_url = text_value
+
+    if message_type in ["image", "video"] and not media_url:
+        raise HTTPException(status_code=400, detail="Media URL is required")
+
+    now = datetime.utcnow()
+
+    if message_type == "text":
+        saved_text = text_value
+        last_message_preview = text_value
+    elif message_type == "image":
+        saved_text = ""
+        last_message_preview = "📷 Image"
+    else:
+        saved_text = ""
+        last_message_preview = "🎥 Video"
+
+    message_data = {
+        "group_id": data.group_id,
+        "sender_id": data.sender_id,
+        "text": saved_text,
+        "message_type": message_type,
+        "media_url": media_url,
+        "created_at": now
+    }
+
+    result = group_messages_collection.insert_one(message_data)
+
+    groups_collection.update_one(
+        {"_id": safe_object_id(data.group_id)},
+        {
+            "$set": {
+                "last_message": last_message_preview,
+                "updated_at": now
+            }
+        }
+    )
+
+    return {
+        "message": "Group message sent successfully",
+        "message_id": str(result.inserted_id),
+        "message_type": message_type,
+        "media_url": media_url,
+        "created_at": now.isoformat() + "Z"
+    }
+# ===============================
+# Group Upload Media
+# ===============================
+@app.post("/group/upload-image")
+async def group_upload_image(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="image",
+            folder="stackmate/group_images"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/group/upload-video")
+async def group_upload_video(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="video",
+            folder="stackmate/group_videos"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
