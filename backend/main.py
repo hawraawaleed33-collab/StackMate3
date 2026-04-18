@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr
 from pymongo import MongoClient
@@ -14,10 +14,10 @@ import random
 import smtplib
 import os
 import re
-from fastapi import Body, HTTPException
 
 import cloudinary
 import cloudinary.uploader
+
 app = FastAPI()
 
 cloudinary.config(
@@ -168,11 +168,13 @@ class Account(BaseModel):
     email: str
     username: str
     password: str
-    account_type: str
+    account_type: str  # developer or user (user = student)
+
     name: str = ""
     description: str = ""
     profile_image: str = ""
     phone: str = ""
+
     job: str = ""
     location: str = ""
     experience: str = ""
@@ -180,12 +182,16 @@ class Account(BaseModel):
     technologies: str = ""
     portfolio: str = ""
 
+# Student Fields
+    student_id: str = ""
+    university_name: str = ""
+    college_name: str = ""
+    department_name: str = ""
+
 
 class LoginData(BaseModel):
     email: str
     password: str
-
-
 class UpdateUserProfile(BaseModel):
     name: str = ""
     username: str = ""
@@ -325,7 +331,8 @@ def db_check():
 def signup(account: Account):
     account_type = account.account_type.lower().strip()
 
-    if account_type not in ["developer", "user", "company"]:
+    # فقط developer أو user (user = student)
+    if account_type not in ["developer", "user"]:
         raise HTTPException(status_code=400, detail="Invalid account type")
 
     existing = accounts_collection.find_one({
@@ -340,6 +347,20 @@ def signup(account: Account):
             status_code=400,
             detail="Email or username already exists"
         )
+
+    # إذا الحساب user نعتبره student ولازم بياناته الجامعية كاملة
+    if account_type == "user":
+        if not account.student_id or not account.university_name or not account.college_name or not account.department_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Student information is required"
+            )
+
+        if not re.fullmatch(r"\d{3}", account.student_id.strip()):
+            raise HTTPException(
+                status_code=400,
+                detail="Student ID must be exactly 3 digits"
+            )
 
     account_data = account.dict()
     account_data["account_type"] = account_type
@@ -393,7 +414,13 @@ def login(data: LoginData):
         "experience": account.get("experience", ""),
         "skills": account.get("skills", ""),
         "technologies": account.get("technologies", ""),
-        "portfolio": account.get("portfolio", "")
+        "portfolio": account.get("portfolio", ""),
+
+        # Student fields
+        "student_id": account.get("student_id", ""),
+        "university_name": account.get("university_name", ""),
+        "college_name": account.get("college_name", ""),
+        "department_name": account.get("department_name", "")
     }
 
 
@@ -417,7 +444,13 @@ def get_account(account_id: str):
         "experience": account.get("experience", ""),
         "skills": account.get("skills", ""),
         "technologies": account.get("technologies", ""),
-        "portfolio": account.get("portfolio", "")
+        "portfolio": account.get("portfolio", ""),
+
+        # Student fields
+        "student_id": account.get("student_id", ""),
+        "university_name": account.get("university_name", ""),
+        "college_name": account.get("college_name", ""),
+        "department_name": account.get("department_name", "")
     }
 
 
@@ -469,6 +502,7 @@ def update_user_profile(account_id: str, profile: UpdateUserProfile):
         )
 
     return {"message": "Profile updated successfully"}
+
 
 
 # ===============================
