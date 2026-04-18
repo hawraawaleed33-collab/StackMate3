@@ -14,7 +14,6 @@ import random
 import smtplib
 import os
 import re
-import requests
 from fastapi import Body, HTTPException
 
 import cloudinary
@@ -1530,113 +1529,56 @@ def increment_video_view(video_id: str):
         "message": "View added",
         "views": updated_video.get("views", 0)
     }
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ===============================
+# AI Search Endpoint (FREE VERSION)
+# ===============================
 
 def is_arabic_text(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
-def extract_response_text(result: dict) -> str:
-    try:
-        return result["output"][0]["content"][0]["text"]
-    except Exception:
-        return ""
 
 def normalize_text(value: str) -> str:
     if not value:
         return ""
     return str(value).strip().lower()
 
+
 def fallback_related_terms(prompt: str) -> list[str]:
     p = normalize_text(prompt)
 
     mapping = {
-        "شبكات": ["شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
-        "network": ["شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
+        "شبكات": ["شبكات", "مهندس شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
+        "network": ["شبكات", "مهندس شبكات", "network", "networks", "networking", "cisco", "routing", "switching", "mikrotik"],
+
         "رياضيات": ["رياضيات", "math", "mathematics", "numerical analysis", "statistics", "algebra"],
         "math": ["رياضيات", "math", "mathematics", "numerical analysis", "statistics", "algebra"],
-        "ذكاء اصطناعي": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning"],
-        "ai": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning"],
-        "frontend": ["frontend", "react", "html", "css", "javascript", "واجهات"],
-        "backend": ["backend", "python", "fastapi", "node", "api", "خلفية"],
+
+        "ذكاء اصطناعي": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning", "neural network"],
+        "ai": ["ذكاء اصطناعي", "ai", "artificial intelligence", "machine learning", "deep learning", "neural network"],
+
+        "frontend": ["frontend", "front-end", "react", "html", "css", "javascript", "واجهات"],
+        "backend": ["backend", "back-end", "python", "fastapi", "node", "api", "خلفية"],
         "mobile": ["mobile", "flutter", "react native", "android", "ios", "تطبيقات"],
         "python": ["python", "fastapi", "django", "flask"],
+        "flutter": ["flutter", "mobile", "android", "ios", "dart"],
+        "react": ["react", "frontend", "javascript", "html", "css"],
     }
+
+    expanded = set()
+    expanded.add(p)
 
     for key, values in mapping.items():
         if key in p:
-            return values
+            for v in values:
+                expanded.add(v.lower())
 
-    return [p]
+    if len(expanded) == 1:
+        words = re.findall(r"[\w\u0600-\u06FF\-\+]+", p)
+        for w in words:
+            expanded.add(w.lower())
 
-def ask_ai_for_search_plan(user_prompt: str) -> dict:
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing")
+    return list(expanded)
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    system_prompt = """
-You are helping a developer recommendation system.
-
-Your job:
-1) Detect the user's reply language: "ar" or "en".
-2) Understand the technical field they want.
-3) Return search terms and related suggestions.
-
-Return JSON only in this exact shape:
-{
-  "language": "ar",
-  "main_query": "شبكات",
-  "keywords": ["شبكات", "network", "networking", "cisco"],
-  "suggestions": ["الأمن السيبراني", "Cisco", "Networking", "Mikrotik"]
-}
-
-Rules:
-- If user writes Arabic, set language to "ar".
-- If user writes English, set language to "en".
-- Keep keywords short and useful for DB search.
-- Suggestions must be related to the same field.
-- Return valid JSON only, no markdown.
-"""
-
-    payload = {
-        "model": "gpt-5.4-mini",
-        "input": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    }
-
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers=headers,
-        json=payload,
-        timeout=60
-    )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"AI request failed: {response.text}")
-
-    result = response.json()
-    raw_text = extract_response_text(result).strip()
-
-    try:
-        parsed = json.loads(raw_text)
-        return {
-            "language": parsed.get("language", "ar" if is_arabic_text(user_prompt) else "en"),
-            "main_query": parsed.get("main_query", user_prompt),
-            "keywords": parsed.get("keywords", fallback_related_terms(user_prompt)),
-            "suggestions": parsed.get("suggestions", fallback_related_terms(user_prompt)[:4]),
-        }
-    except Exception:
-        return {
-            "language": "ar" if is_arabic_text(user_prompt) else "en",
-            "main_query": user_prompt,
-            "keywords": fallback_related_terms(user_prompt),
-            "suggestions": fallback_related_terms(user_prompt)[:4],
-        }
 
 @app.post("/ai-search")
 async def ai_search(prompt: str = Body(...)):
@@ -1645,14 +1587,11 @@ async def ai_search(prompt: str = Body(...)):
         if not user_prompt:
             raise HTTPException(status_code=400, detail="Prompt is required")
 
-        search_plan = ask_ai_for_search_plan(user_prompt)
-        language = search_plan["language"]
-        main_query = search_plan["main_query"]
-        keywords = [normalize_text(k) for k in search_plan["keywords"] if normalize_text(k)]
-        suggestions = search_plan["suggestions"]
+        language = "ar" if is_arabic_text(user_prompt) else "en"
 
-        if not keywords:
-            keywords = [normalize_text(user_prompt)]
+        keywords = fallback_related_terms(user_prompt)
+        main_query = user_prompt
+        suggestions = keywords[:4]
 
         regex_conditions = []
         for kw in keywords:
@@ -1667,6 +1606,7 @@ async def ai_search(prompt: str = Body(...)):
         developers = list(developers_collection.find({"$or": regex_conditions}))
 
         ranked_developers = []
+
         for dev in developers:
             dev_id = str(dev["_id"])
 
@@ -1698,8 +1638,7 @@ async def ai_search(prompt: str = Body(...)):
                 "likes": total_likes,
                 "score": score
             })
-
-        ranked_developers.sort(key=lambda x: x["score"], reverse=True)
+            ranked_developers.sort(key=lambda x: x["score"], reverse=True)
         top_developers = ranked_developers[:5]
 
         if not top_developers:
