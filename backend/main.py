@@ -80,6 +80,18 @@ video_dislikes_collection = db["video_dislikes"]
 video_saves_collection = db["video_saves"]
 
 # ===============================
+# Chat Collections
+# ===============================
+conversations_collection = db["conversations"]
+messages_collection = db["messages"]
+
+# ===============================
+# AI Chat Collections (NEW)
+# ===============================
+ai_conversations_collection = db["ai_conversations"]
+ai_messages_collection = db["ai_messages"]
+
+# ===============================
 # Chat Collections (NEW)
 # ===============================
 conversations_collection = db["conversations"]
@@ -182,7 +194,7 @@ class Account(BaseModel):
     technologies: str = ""
     portfolio: str = ""
 
-# Student Fields
+    # Student Fields
     student_id: str = ""
     university_name: str = ""
     college_name: str = ""
@@ -192,6 +204,19 @@ class Account(BaseModel):
 class LoginData(BaseModel):
     email: str
     password: str
+
+
+# ===============================
+# AI Chat Models (NEW)
+# ===============================
+class AIMessageRequest(BaseModel):
+    user_id: str
+    prompt: str
+    conversation_id: str = ""
+
+
+class AIConversationCreate(BaseModel):
+    user_id: str
 class UpdateUserProfile(BaseModel):
     name: str = ""
     username: str = ""
@@ -1564,7 +1589,7 @@ def increment_video_view(video_id: str):
         "views": updated_video.get("views", 0)
     }
 # ===============================
-# AI Search Endpoint (FREE VERSION)
+# AI Search Endpoint (DB VERSION)
 # ===============================
 
 def is_arabic_text(text: str) -> bool:
@@ -1615,11 +1640,47 @@ def fallback_related_terms(prompt: str) -> list[str]:
 
 
 @app.post("/ai-search")
-async def ai_search(prompt: str = Body(...)):
+async def ai_search(data: AIMessageRequest):
     try:
-        user_prompt = str(prompt).strip()
+        user_id = data.user_id.strip()
+        user_prompt = str(data.prompt).strip()
+        conversation_id = data.conversation_id.strip()
+
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+
         if not user_prompt:
             raise HTTPException(status_code=400, detail="Prompt is required")
+
+        account = accounts_collection.find_one({"_id": safe_object_id(user_id)})
+        if not account:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # إذا ماكو محادثة، ننشئ وحدة جديدة
+        if not conversation_id:
+            conv_result = ai_conversations_collection.insert_one({
+                "user_id": user_id,
+                "title": user_prompt[:40],
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            })
+            conversation_id = str(conv_result.inserted_id)
+        else:
+            existing_conv = ai_conversations_collection.find_one({
+                "_id": safe_object_id(conversation_id),
+                "user_id": user_id
+            })
+            if not existing_conv:
+                raise HTTPException(status_code=404, detail="AI conversation not found")
+
+        # نحفظ رسالة المستخدم
+        ai_messages_collection.insert_one({
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "role": "user",
+            "text": user_prompt,
+            "created_at": datetime.utcnow()
+        })
 
         language = "ar" if is_arabic_text(user_prompt) else "en"
 
@@ -1672,7 +1733,8 @@ async def ai_search(prompt: str = Body(...)):
                 "likes": total_likes,
                 "score": score
             })
-            ranked_developers.sort(key=lambda x: x["score"], reverse=True)
+
+        ranked_developers.sort(key=lambda x: x["score"], reverse=True)
         top_developers = ranked_developers[:5]
 
         if not top_developers:
@@ -1686,36 +1748,51 @@ async def ai_search(prompt: str = Body(...)):
                     f"No developers found for: {main_query}\n"
                     f"Try searching for: {', '.join(suggestions)}"
                 )
-
-            return {
-                "reply": reply,
-                "language": language,
-                "keyword": main_query,
-                "developers": [],
-                "suggestions": suggestions
-            }
-
-        if language == "ar":
-            lines = [f"أفضل المبرمجين في مجال: {main_query}"]
-            for i, dev in enumerate(top_developers, start=1):
-                title = dev.get("job") or dev.get("skill") or "مبرمج"
-                tech = dev.get("technologies", "")
-                lines.append(
-                    f"{i}. {dev['name']} — {title} — {tech} "
-                    f"(المشاهدات: {dev['views']}, الإعجابات: {dev['likes']})"
-                )
         else:
-            lines = [f"Best developers for: {main_query}"]
-            for i, dev in enumerate(top_developers, start=1):
-                title = dev.get("job") or dev.get("skill") or "Developer"
-                tech = dev.get("technologies", "")
-                lines.append(
-                    f"{i}. {dev['name']} — {title} — {tech} "
-                    f"(Views: {dev['views']}, Likes: {dev['likes']})"
-                )
+            if language == "ar":
+                lines = [f"أفضل المبرمجين في مجال: {main_query}"]
+                for i, dev in enumerate(top_developers, start=1):
+                    title = dev.get("job") or dev.get("skill") or "مبرمج"
+                    tech = dev.get("technologies", "")
+                    lines.append(
+                        f"{i}. {dev['name']} — {title} — {tech} "
+                        f"(المشاهدات: {dev['views']}, الإعجابات: {dev['likes']})"
+                    )
+                reply = "\n".join(lines)
+            else:
+                lines = [f"Best developers for: {main_query}"]
+                for i, dev in enumerate(top_developers, start=1):
+                    title = dev.get("job") or dev.get("skill") or "Developer"
+                    tech = dev.get("technologies", "")
+                    lines.append(
+                        f"{i}. {dev['name']} — {title} — {tech} "
+                        f"(Views: {dev['views']}, Likes: {dev['likes']})"
+                    )
+                reply = "\n".join(lines)
 
+        # نحفظ رد AI
+        ai_messages_collection.insert_one({
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "role": "assistant",
+            "text": reply,
+            "developers": top_developers,
+            "created_at": datetime.utcnow()
+        })
+
+        # نحدث وقت آخر محادثة
+        ai_conversations_collection.update_one(
+            {"_id": safe_object_id(conversation_id)},
+            {
+                "$set": {
+                    "updated_at": datetime.utcnow(),
+                    "last_message": user_prompt
+                }
+            }
+        )
         return {
-            "reply": "\n".join(lines),
+            "conversation_id": conversation_id,
+            "reply": reply,
             "language": language,
             "keyword": main_query,
             "developers": top_developers,
@@ -1724,3 +1801,45 @@ async def ai_search(prompt: str = Body(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    # ===============================
+# AI Chat History
+# ===============================
+@app.get("/ai-conversations/{user_id}")
+def get_ai_conversations(user_id: str):
+    conversations = ai_conversations_collection.find({
+        "user_id": user_id
+    }).sort("updated_at", -1)
+
+    result = []
+    for conv in conversations:
+        result.append({
+            "conversation_id": str(conv["_id"]),
+            "title": conv.get("title", ""),
+            "last_message": conv.get("last_message", ""),
+            "updated_at": conv.get("updated_at").isoformat() + "Z" if conv.get("updated_at") else ""
+        })
+
+    return result
+
+
+@app.get("/ai-messages/{conversation_id}")
+def get_ai_messages(conversation_id: str):
+    messages = ai_messages_collection.find({
+        "conversation_id": conversation_id
+    }).sort("created_at", 1)
+
+    result = []
+    for msg in messages:
+        result.append({
+            "id": str(msg["_id"]),
+            "conversation_id": msg.get("conversation_id", ""),
+            "user_id": msg.get("user_id", ""),
+            "role": msg.get("role", ""),
+            "text": msg.get("text", ""),
+            "developers": msg.get("developers", []),
+            "created_at": msg.get("created_at").isoformat() + "Z" if msg.get("created_at") else ""
+        })
+
+    return result
+
+    
