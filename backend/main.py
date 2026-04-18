@@ -86,16 +86,15 @@ conversations_collection = db["conversations"]
 messages_collection = db["messages"]
 
 # ===============================
-# AI Chat Collections (NEW)
+# AI Chat Collections
 # ===============================
 ai_conversations_collection = db["ai_conversations"]
 ai_messages_collection = db["ai_messages"]
-
 # ===============================
-# Chat Collections (NEW)
+# Groups Collections
 # ===============================
-conversations_collection = db["conversations"]
-messages_collection = db["messages"]
+groups_collection = db["groups"]
+group_messages_collection = db["group_messages"]
 # ===============================
 # Static Files
 # ===============================
@@ -245,11 +244,9 @@ class ResetPasswordRequest(BaseModel):
     email_or_phone: str
     code: str
     new_password: str
-    
+  # ===============================
+# Chat Models
 # ===============================
-# Chat Models (NEW)
-# ===============================
-
 class ConversationCreate(BaseModel):
     sender_id: str
     receiver_id: str
@@ -259,14 +256,28 @@ class MessageCreate(BaseModel):
     conversation_id: str
     sender_id: str
     receiver_id: str
-    text: str
-    message_type: str = "text"
-    
-    
+    text: str = ""
+    message_type: str = "text"   # text | image | video
+    media_url: str = ""
+
+# ===============================
+# Group Models
+# ===============================
+class GroupCreate(BaseModel):
+    creator_id: str
+    name: str
+    member_ids: list[str]
+
+
+class GroupMessageCreate(BaseModel):
+    group_id: str
+    sender_id: str
+    text: str = ""
+    message_type: str = "text"   # text | image | video
+    media_url: str = ""
 # ===============================
 # Video Interactions Models
 # ===============================
-
 class VideoLike(BaseModel):
     user_id: str
     video_id: str
@@ -1841,5 +1852,105 @@ def get_ai_messages(conversation_id: str):
         })
 
     return result
+# ===============================
+# Users Search (for Create Group)
+# ===============================
+@app.get("/users/search")
+def search_users(q: str = "", current_user_id: str = ""):
+    query = {}
 
+    if q.strip():
+        query = {
+            "$or": [
+                {"name": {"$regex": q, "$options": "i"}},
+                {"username": {"$regex": q, "$options": "i"}},
+                {"email": {"$regex": q, "$options": "i"}},
+            ]
+        }
+
+    users = accounts_collection.find(query).limit(50)
+
+    result = []
+    for user in users:
+        user_id = str(user["_id"])
+
+        if current_user_id and user_id == current_user_id:
+            continue
+
+        result.append({
+            "id": user_id,
+            "name": user.get("name", ""),
+            "username": user.get("username", ""),
+            "profile_image": user.get("profile_image", ""),
+            "account_type": user.get("account_type", "")
+        })
+
+    return result
+
+
+# ===============================
+# Groups
+# ===============================
+@app.post("/groups/create")
+def create_group(data: GroupCreate):
+    creator = accounts_collection.find_one({"_id": safe_object_id(data.creator_id)})
+    if not creator:
+        raise HTTPException(status_code=404, detail="Creator not found")
+
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Group name is required")
+
+    valid_member_ids = []
+
+    for member_id in data.member_ids:
+        try:
+            member = accounts_collection.find_one({"_id": safe_object_id(member_id)})
+            if member:
+                valid_member_ids.append(member_id)
+        except Exception:
+            continue
+
+    # نضمن أن منشئ الكروب موجود ضمن الأعضاء
+    all_members = list(set([data.creator_id] + valid_member_ids))
+
+    now = datetime.utcnow()
+
+    group_data = {
+        "name": data.name.strip(),
+        "image": "",
+        "creator_id": data.creator_id,
+        "members": all_members,
+        "last_message": "",
+        "updated_at": now,
+        "created_at": now
+    }
+
+    result = groups_collection.insert_one(group_data)
+
+    return {
+        "message": "Group created successfully",
+        "group_id": str(result.inserted_id)
+    }
+
+
+@app.get("/groups/{user_id}")
+def get_user_groups(user_id: str):
+    groups = groups_collection.find({
+        "members": user_id
+    }).sort("updated_at", -1)
+
+    result = []
+
+    for group in groups:
+        result.append({
+            "group_id": str(group["_id"]),
+            "name": group.get("name", "Group"),
+            "image": group.get("image", ""),
+            "last_message": group.get("last_message", ""),
+            "updated_at": group.get("updated_at").isoformat() + "Z"
+            if group.get("updated_at") else "",
+            "members_count": len(group.get("members", []))
+        })
+
+    return result
     
