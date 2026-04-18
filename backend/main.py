@@ -91,6 +91,13 @@ ai_messages_collection = db["ai_messages"]
 # ===============================
 groups_collection = db["groups"]
 group_messages_collection = db["group_messages"]
+
+# ===============================
+# Channel Collections
+# ===============================
+channels_collection = db["channels"]
+channel_messages_collection = db["channel_messages"]
+channel_followers_collection = db["channel_followers"]
 # ===============================
 # Static Files
 # ===============================
@@ -280,6 +287,28 @@ class GroupMessageCreate(BaseModel):
     text: str | None = None
     message_type: str = "text"   # text | image | video
     media_url: str | None = None
+    # ===============================
+# Channel Models
+# ===============================
+class ChannelCreate(BaseModel):
+    owner_id: str
+    name: str
+    description: str = ""
+    image: str = ""
+    is_public: bool = True
+
+
+class ChannelMessageCreate(BaseModel):
+    channel_id: str
+    sender_id: str
+    text: str | None = None
+    message_type: str = "text"   # text | image | video
+    media_url: str | None = None
+
+
+class ChannelFollowToggle(BaseModel):
+    user_id: str
+    channel_id: str
 # ===============================
 # Video Interactions Models
 # ===============================
@@ -2217,6 +2246,294 @@ async def group_upload_video(file: UploadFile = File(...)):
             file.file,
             resource_type="video",
             folder="stackmate/group_videos"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    # ===============================
+# Channels
+# ===============================
+
+@app.post("/channels/create")
+def create_channel(data: ChannelCreate):
+    owner = accounts_collection.find_one({"_id": safe_object_id(data.owner_id)})
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Channel name is required")
+
+    now = datetime.utcnow()
+
+    channel_data = {
+        "name": data.name.strip(),
+        "description": (data.description or "").strip(),
+        "image": (data.image or "").strip(),
+        "owner_id": data.owner_id,
+        "is_public": data.is_public,
+        "followers_count": 1,
+        "last_message": "",
+        "created_at": now,
+        "updated_at": now
+    }
+
+    result = channels_collection.insert_one(channel_data)
+
+    channel_followers_collection.insert_one({
+        "channel_id": str(result.inserted_id),
+        "user_id": data.owner_id,
+        "created_at": now
+    })
+
+    return {
+        "message": "Channel created successfully",
+        "channel_id": str(result.inserted_id)
+    }
+
+
+@app.get("/channels")
+def get_channels(user_id: str = ""):
+    channels = channels_collection.find().sort("updated_at", -1)
+
+    result = []
+
+    for channel in channels:
+        channel_id = str(channel["_id"])
+
+        owner = None
+        try:
+            owner = accounts_collection.find_one({
+                "_id": safe_object_id(channel.get("owner_id", ""))
+            })
+        except Exception:
+            owner = None
+
+        is_following = False
+        if user_id:
+            is_following = channel_followers_collection.find_one({
+                "channel_id": channel_id,
+                "user_id": user_id
+            }) is not None
+
+        result.append({
+            "channel_id": channel_id,
+            "name": channel.get("name", "Channel"),
+            "description": channel.get("description", ""),
+            "image": channel.get("image", ""),
+            "owner_id": channel.get("owner_id", ""),
+            "owner_name": owner.get("name", "") if owner else "",
+            "followers_count": channel.get("followers_count", 0),
+            "last_message": channel.get("last_message", ""),
+            "updated_at": channel.get("updated_at").isoformat() + "Z"
+            if channel.get("updated_at") else "",
+            "is_following": is_following,
+            "is_owner": user_id == channel.get("owner_id", "")
+        })
+
+    return result
+
+
+@app.get("/channels/{channel_id}")
+def get_channel_details(channel_id: str, user_id: str = ""):
+    channel = channels_collection.find_one({"_id": safe_object_id(channel_id)})
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    owner = None
+    try:
+        owner = accounts_collection.find_one({
+            "_id": safe_object_id(channel.get("owner_id", ""))
+        })
+    except Exception:
+        owner = None
+
+    is_following = False
+    if user_id:
+        is_following = channel_followers_collection.find_one({
+            "channel_id": channel_id,
+            "user_id": user_id
+        }) is not None
+
+    return {
+        "channel_id": str(channel["_id"]),
+        "name": channel.get("name", "Channel"),
+        "description": channel.get("description", ""),
+        "image": channel.get("image", ""),
+        "owner_id": channel.get("owner_id", ""),
+        "owner_name": owner.get("name", "") if owner else "",
+        "followers_count": channel.get("followers_count", 0),
+        "is_public": channel.get("is_public", True),
+        "is_following": is_following,
+        "is_owner": user_id == channel.get("owner_id", "")
+    }
+
+
+@app.post("/channels/follow-toggle")
+def toggle_follow_channel(data: ChannelFollowToggle):
+    channel = channels_collection.find_one({"_id": safe_object_id(data.channel_id)})
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    user = accounts_collection.find_one({"_id": safe_object_id(data.user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = channel_followers_collection.find_one({
+        "channel_id": data.channel_id,
+        "user_id": data.user_id
+    })
+
+    if existing:
+        channel_followers_collection.delete_one({"_id": existing["_id"]})
+        channels_collection.update_one(
+            {"_id": safe_object_id(data.channel_id)},
+            {"$inc": {"followers_count": -1}}
+        )
+        return {"message": "Channel unfollowed", "is_following": False}
+
+    channel_followers_collection.insert_one({
+        "channel_id": data.channel_id,
+        "user_id": data.user_id,
+        "created_at": datetime.utcnow()
+    })
+
+    channels_collection.update_one(
+        {"_id": safe_object_id(data.channel_id)},
+        {"$inc": {"followers_count": 1}}
+    )
+
+    return {"message": "Channel followed", "is_following": True}
+
+
+@app.get("/channel/messages/{channel_id}")
+def get_channel_messages(channel_id: str):
+    channel = channels_collection.find_one({"_id": safe_object_id(channel_id)})
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    messages = channel_messages_collection.find({
+        "channel_id": channel_id
+    }).sort("created_at", 1)
+
+    result = []
+
+    for msg in messages:
+        sender = None
+        sender_id = msg.get("sender_id", "")
+
+        if sender_id:
+            try:
+                sender = accounts_collection.find_one({
+                    "_id": safe_object_id(sender_id)
+                })
+            except Exception:
+                sender = None
+
+        result.append({
+            "id": str(msg["_id"]),
+            "channel_id": msg.get("channel_id", ""),
+            "sender_id": sender_id,
+            "sender_name": (sender.get("name", "") or sender.get("username", "")) if sender else "",
+            "sender_image": sender.get("profile_image", "") if sender else "",
+            "text": msg.get("text", ""),
+            "message_type": msg.get("message_type", "text"),
+            "media_url": msg.get("media_url", ""),
+            "created_at": msg.get("created_at").isoformat() + "Z"
+            if msg.get("created_at") else ""
+        })
+
+    return result
+
+
+@app.post("/channel/message")
+def send_channel_message(data: ChannelMessageCreate):
+    channel = channels_collection.find_one({"_id": safe_object_id(data.channel_id)})
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    sender = accounts_collection.find_one({"_id": safe_object_id(data.sender_id)})
+    if not sender:
+        raise HTTPException(status_code=404, detail="Sender not found")
+
+    if data.sender_id != channel.get("owner_id", ""):
+        raise HTTPException(status_code=403, detail="Only the channel owner can post")
+
+    message_type = (data.message_type or "text").strip().lower()
+    text_value = (data.text or "").strip() if data.text else ""
+    media_url = (data.media_url or "").strip() if data.media_url else ""
+
+    if message_type not in ["text", "image", "video"]:
+        raise HTTPException(status_code=400, detail="Invalid message type")
+
+    if message_type == "text" and not text_value:
+        raise HTTPException(status_code=400, detail="Message text cannot be empty")
+
+    if message_type in ["image", "video"] and not media_url:
+        media_url = text_value
+
+    if message_type in ["image", "video"] and not media_url:
+        raise HTTPException(status_code=400, detail="Media URL is required")
+
+    now = datetime.utcnow()
+
+    if message_type == "text":
+        saved_text = text_value
+        last_message_preview = text_value
+    elif message_type == "image":
+        saved_text = ""
+        last_message_preview = "📷 Image"
+    else:
+        saved_text = ""
+        last_message_preview = "🎥 Video"
+        message_data = {
+        "channel_id": data.channel_id,
+        "sender_id": data.sender_id,
+        "text": saved_text,
+        "message_type": message_type,
+        "media_url": media_url,
+        "created_at": now
+    }
+
+    result = channel_messages_collection.insert_one(message_data)
+
+    channels_collection.update_one(
+        {"_id": safe_object_id(data.channel_id)},
+        {
+            "$set": {
+                "last_message": last_message_preview,
+                "updated_at": now
+            }
+        }
+    )
+
+    return {
+        "message": "Channel post created successfully",
+        "message_id": str(result.inserted_id),
+        "message_type": message_type,
+        "media_url": media_url,
+        "created_at": now.isoformat() + "Z"
+    }
+
+
+@app.post("/channel/upload-image")
+async def channel_upload_image(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="image",
+            folder="stackmate/channel_images"
+        )
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/channel/upload-video")
+async def channel_upload_video(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            resource_type="video",
+            folder="stackmate/channel_videos"
         )
         return {"url": result["secure_url"]}
     except Exception as e:
