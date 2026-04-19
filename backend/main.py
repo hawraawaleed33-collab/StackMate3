@@ -326,6 +326,18 @@ class VideoSave(BaseModel):
     user_id: str
     video_id: str
 # ===============================
+# Admin Models
+# ===============================
+class AdminUserAction(BaseModel):
+    admin_id: str
+    user_id: str
+
+
+class AdminVerifyDeveloperAction(BaseModel):
+    admin_id: str
+    user_id: str
+    verify: bool = True
+# ===============================
 # Helper
 # ===============================
 def safe_object_id(value: str):
@@ -2569,3 +2581,151 @@ def make_me_admin(user_id: str):
         {"$set": {"is_admin": True}}
     )
     return {"message": "You are now admin"}
+# ===============================
+# Admin Panel
+# ===============================
+
+@app.get("/admin/users")
+def get_all_users(admin_id: str):
+    admin = accounts_collection.find_one({"_id": safe_object_id(admin_id)})
+
+    if not admin or not admin.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    users = accounts_collection.find().sort("_id", -1)
+
+    result = []
+    for user in users:
+        result.append({
+            "id": str(user["_id"]),
+            "name": user.get("name", ""),
+            "username": user.get("username", ""),
+            "email": user.get("email", ""),
+            "account_type": user.get("account_type", ""),
+            "profile_image": user.get("profile_image", ""),
+            "is_admin": user.get("is_admin", False),
+            "is_blocked": user.get("is_blocked", False),
+            "is_verified_developer": user.get("is_verified_developer", False)
+        })
+
+    return result
+
+
+@app.post("/admin/block-user")
+def block_user(data: AdminUserAction):
+    admin = accounts_collection.find_one({"_id": safe_object_id(data.admin_id)})
+
+    if not admin or not admin.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = accounts_collection.find_one({"_id": safe_object_id(data.user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.get("is_admin", False):
+        raise HTTPException(status_code=400, detail="Admin account cannot be blocked")
+
+    accounts_collection.update_one(
+        {"_id": safe_object_id(data.user_id)},
+        {"$set": {"is_blocked": True}}
+    )
+
+    return {"message": "User blocked successfully"}
+
+
+@app.post("/admin/unblock-user")
+def unblock_user(data: AdminUserAction):
+    admin = accounts_collection.find_one({"_id": safe_object_id(data.admin_id)})
+
+    if not admin or not admin.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = accounts_collection.find_one({"_id": safe_object_id(data.user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    accounts_collection.update_one(
+        {"_id": safe_object_id(data.user_id)},
+        {"$set": {"is_blocked": False}}
+    )
+
+    return {"message": "User unblocked successfully"}
+
+
+@app.post("/admin/verify-developer")
+def verify_developer(data: AdminVerifyDeveloperAction):
+    admin = accounts_collection.find_one({"_id": safe_object_id(data.admin_id)})
+
+    if not admin or not admin.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = accounts_collection.find_one({"_id": safe_object_id(data.user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.get("account_type") != "developer":
+        raise HTTPException(status_code=400, detail="This account is not a developer")
+
+    accounts_collection.update_one(
+        {"_id": safe_object_id(data.user_id)},
+        {"$set": {"is_verified_developer": data.verify}}
+    )
+
+    return {
+        "message": "Developer verification updated successfully",
+        "is_verified_developer": data.verify
+    }
+
+
+@app.delete("/admin/delete-user")
+def delete_user(admin_id: str, user_id: str):
+    admin = accounts_collection.find_one({"_id": safe_object_id(admin_id)})
+
+    if not admin or not admin.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = accounts_collection.find_one({"_id": safe_object_id(user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.get("is_admin", False):
+        raise HTTPException(status_code=400, detail="Admin account cannot be deleted")
+
+    # حذف الحساب الأساسي
+    accounts_collection.delete_one({"_id": safe_object_id(user_id)})
+
+    # إذا Developer نحذف سجل المطور
+    if user.get("account_type") == "developer":
+        developers_collection.delete_one({"account_id": user_id})
+        # حذف المحادثات الفردية ورسائلها
+    user_conversations = list(conversations_collection.find({
+        "participants": user_id
+    }))
+
+    for conv in user_conversations:
+        conv_id = str(conv["_id"])
+        messages_collection.delete_many({"conversation_id": conv_id})
+
+    conversations_collection.delete_many({"participants": user_id})
+
+    # حذف رسائل الكروبات اللي مرسلها
+    group_messages_collection.delete_many({"sender_id": user_id})
+
+    # حذف منشورات القنوات اللي مرسلها
+    channel_messages_collection.delete_many({"sender_id": user_id})
+
+    # حذف متابعة القنوات إذا موجودة
+    if "channel_followers_collection" in globals():
+        channel_followers_collection.delete_many({"user_id": user_id})
+
+    # حذف المتابعات العادية إذا موجودة
+    if "follows_collection" in globals():
+        follows_collection.delete_many({
+            "$or": [
+                {"follower_id": user_id},
+                {"following_id": user_id},
+                {"user_id": user_id}
+            ]
+        })
+
+    return {"message": "User deleted successfully"}
